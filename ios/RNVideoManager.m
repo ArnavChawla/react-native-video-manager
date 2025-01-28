@@ -43,30 +43,58 @@ RCT_EXPORT_METHOD(merge:(NSArray *)fileNames
     CMTime insertTime = kCMTimeZero;
     CGAffineTransform originalTransform;
     
-    for (id object in fileNames)
-    {
+    for (id object in fileNames) {
+        NSURL *fileURL = [NSURL URLWithString:object];
         
-        AVAsset *asset = [AVAsset assetWithURL:[NSURL fileURLWithPath:object]];
-        
-        CMTimeRange timeRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
-        
-        [videoTrack insertTimeRange:timeRange
-                            ofTrack:[[asset tracksWithMediaType:AVMediaTypeVideo] objectAtIndex:0]
-                             atTime:insertTime
-                              error:nil];
-        
-        [audioTrack insertTimeRange:timeRange
-                            ofTrack:[[asset tracksWithMediaType:AVMediaTypeAudio] objectAtIndex:0]
-                             atTime:insertTime
-                              error:nil];
-        
-        insertTime = CMTimeAdd(insertTime,asset.duration);
-        
-        // Get the first track from the asset and its transform.
-        NSArray* tracks = [asset tracks];
-        AVAssetTrack* track = [tracks objectAtIndex:0];
-        originalTransform = [track preferredTransform];
+        if (fileURL) {
+            NSString *filePath = [fileURL path];
+            
+            if ([[NSFileManager defaultManager] fileExistsAtPath:filePath]) {
+                NSLog(@"File exists at path: %@", filePath);
+                
+
+                AVAsset *asset = [AVAsset assetWithURL:[NSURL fileURLWithPath:filePath]];
+
+                NSDictionary *fileAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:nil];
+                NSNumber *fileSize = fileAttributes[NSFileSize];
+                if ([fileSize longLongValue] == 0) {
+                    NSLog(@"Warning: The file at %@ has a size of 0 bytes.", filePath);
+                    continue;
+                }
+
+                CMTimeRange timeRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
+
+                if (CMTIME_COMPARE_INLINE(asset.duration, ==, kCMTimeZero)) {
+                    NSLog(@"Warning: Asset duration for %@ is zero.", filePath);
+                    continue;
+                }
+
+                // Insert video and audio time ranges
+                [videoTrack insertTimeRange:timeRange
+                                    ofTrack:[[asset tracksWithMediaType:AVMediaTypeVideo] objectAtIndex:0]
+                                     atTime:insertTime
+                                      error:nil];
+                
+                [audioTrack insertTimeRange:timeRange
+                                    ofTrack:[[asset tracksWithMediaType:AVMediaTypeAudio] objectAtIndex:0]
+                                     atTime:insertTime
+                                      error:nil];
+                
+                // Update the insertion time for the next asset
+                insertTime = CMTimeAdd(insertTime, asset.duration);
+                
+                // Get the first track from the asset and its transform
+                NSArray* tracks = [asset tracks];
+                AVAssetTrack* track = [tracks objectAtIndex:0];
+                originalTransform = [track preferredTransform];
+            } else {
+                NSLog(@"Error: File does not exist at path: %@", filePath);
+            }
+        } else {
+            NSLog(@"Error: Invalid NSURL for object: %@", object);
+        }
     }
+
     
     // Use the transform from the original track to set the video track transform.
     if (originalTransform.a || originalTransform.b || originalTransform.c || originalTransform.d) {
