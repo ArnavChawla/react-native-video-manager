@@ -1,4 +1,3 @@
-
 #import "RNVideoManager.h"
 
 @implementation RNVideoManager
@@ -28,7 +27,6 @@ RCT_EXPORT_METHOD(merge:(NSArray *)fileNames
 
 -(void)MergeVideo:(NSArray *)fileNames resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject
 {
-    
     CGFloat totalDuration;
     totalDuration = 0;
     
@@ -41,7 +39,21 @@ RCT_EXPORT_METHOD(merge:(NSArray *)fileNames
                                                                         preferredTrackID:kCMPersistentTrackID_Invalid];
     
     CMTime insertTime = kCMTimeZero;
-    CGAffineTransform originalTransform;
+    
+    // Create composition
+    AVMutableVideoComposition *mainComposition = [AVMutableVideoComposition videoComposition];
+    AVMutableVideoCompositionInstruction *mainInstruction = [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+    
+    NSMutableArray *layerInstructions = [[NSMutableArray alloc] init];
+    CMTime currentTime = kCMTimeZero;
+    
+    // Get the first video to determine composition size
+    AVAsset *firstAsset = [AVAsset assetWithURL:[NSURL fileURLWithPath:[[NSURL URLWithString:[fileNames firstObject]] path]]];
+    AVAssetTrack *firstTrack = [[firstAsset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+    CGSize naturalSize = firstTrack.naturalSize;
+    
+    // For the render size, we'll use the height as width and width as height since we know the video is rotated
+    CGSize renderSize = CGSizeMake(naturalSize.height, naturalSize.width);
     
     for (id object in fileNames) {
         NSURL *fileURL = [NSURL URLWithString:object];
@@ -50,82 +62,79 @@ RCT_EXPORT_METHOD(merge:(NSArray *)fileNames
             NSString *filePath = [fileURL path];
             
             if ([[NSFileManager defaultManager] fileExistsAtPath:filePath]) {
-                NSLog(@"File exists at path: %@", filePath);
-                
-
                 AVAsset *asset = [AVAsset assetWithURL:[NSURL fileURLWithPath:filePath]];
-
-                NSDictionary *fileAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:nil];
-                NSNumber *fileSize = fileAttributes[NSFileSize];
-                if ([fileSize longLongValue] == 0) {
-                    NSLog(@"Warning: The file at %@ has a size of 0 bytes.", filePath);
-                    continue;
-                }
-
+                AVAssetTrack *videoAssetTrack = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+                
+                if (!videoAssetTrack) continue;
+                
                 CMTimeRange timeRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
-
-                if (CMTIME_COMPARE_INLINE(asset.duration, ==, kCMTimeZero)) {
-                    NSLog(@"Warning: Asset duration for %@ is zero.", filePath);
-                    continue;
-                }
-
-                // Insert video and audio time ranges
+                
+                // Insert tracks
                 [videoTrack insertTimeRange:timeRange
-                                    ofTrack:[[asset tracksWithMediaType:AVMediaTypeVideo] objectAtIndex:0]
-                                     atTime:insertTime
-                                      error:nil];
+                                  ofTrack:videoAssetTrack
+                                   atTime:insertTime
+                                    error:nil];
                 
-                [audioTrack insertTimeRange:timeRange
-                                    ofTrack:[[asset tracksWithMediaType:AVMediaTypeAudio] objectAtIndex:0]
-                                     atTime:insertTime
-                                      error:nil];
+                AVAssetTrack *audioAssetTrack = [[asset tracksWithMediaType:AVMediaTypeAudio] firstObject];
+                if (audioAssetTrack) {
+                    [audioTrack insertTimeRange:timeRange
+                                      ofTrack:audioAssetTrack
+                                       atTime:insertTime
+                                        error:nil];
+                }
                 
-                // Update the insertion time for the next asset
+                // Create layer instruction
+                AVMutableVideoCompositionLayerInstruction *instruction = 
+                    [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:videoTrack];
+                
+                // Set up transform for 90-degree rotation (b=1, c=-1)
+                CGAffineTransform transform = CGAffineTransformIdentity;
+                
+                // First translate to move the video into view after rotation
+                transform = CGAffineTransformTranslate(transform, videoAssetTrack.naturalSize.height, 0);
+                
+                // Then apply the 90-degree rotation
+                transform = CGAffineTransformRotate(transform, M_PI_2);
+                
+                [instruction setTransform:transform atTime:currentTime];
+                [layerInstructions addObject:instruction];
+                
+                // Update timing
                 insertTime = CMTimeAdd(insertTime, asset.duration);
-                
-                // Get the first track from the asset and its transform
-                NSArray* tracks = [asset tracks];
-                AVAssetTrack* track = [tracks objectAtIndex:0];
-                originalTransform = [track preferredTransform];
-            } else {
-                NSLog(@"Error: File does not exist at path: %@", filePath);
+                currentTime = CMTimeAdd(currentTime, asset.duration);
             }
-        } else {
-            NSLog(@"Error: Invalid NSURL for object: %@", object);
         }
     }
-
     
-    // Use the transform from the original track to set the video track transform.
-    if (originalTransform.a || originalTransform.b || originalTransform.c || originalTransform.d) {
-        videoTrack.preferredTransform = originalTransform;
-    }
+    // Configure main composition
+    mainInstruction.timeRange = CMTimeRangeMake(kCMTimeZero, insertTime);
+    mainInstruction.layerInstructions = layerInstructions;
+    mainComposition.instructions = @[mainInstruction];
+    mainComposition.frameDuration = CMTimeMake(1, 30);
+    mainComposition.renderSize = renderSize;
     
-    NSString* documentsDirectory= [self applicationDocumentsDirectory];
-    NSString * myDocumentPath = [documentsDirectory stringByAppendingPathComponent:@"merged_video.mp4"];
-    NSURL * urlVideoMain = [[NSURL alloc] initFileURLWithPath: myDocumentPath];
+    NSString* documentsDirectory = [self applicationDocumentsDirectory];
+    NSString* myDocumentPath = [documentsDirectory stringByAppendingPathComponent:@"merged_video.mp4"];
+    NSURL* urlVideoMain = [[NSURL alloc] initFileURLWithPath:myDocumentPath];
     
-    if([[NSFileManager defaultManager] fileExistsAtPath:myDocumentPath])
-    {
+    if([[NSFileManager defaultManager] fileExistsAtPath:myDocumentPath]) {
         [[NSFileManager defaultManager] removeItemAtPath:myDocumentPath error:nil];
     }
     
-    AVAssetExportSession *exporter = [[AVAssetExportSession alloc] initWithAsset:mixComposition presetName:AVAssetExportPresetHighestQuality];
+    AVAssetExportSession *exporter = [[AVAssetExportSession alloc] initWithAsset:mixComposition 
+                                                                     presetName:AVAssetExportPresetHighestQuality];
     exporter.outputURL = urlVideoMain;
     exporter.outputFileType = @"com.apple.quicktime-movie";
     exporter.shouldOptimizeForNetworkUse = YES;
+    exporter.videoComposition = mainComposition;
     
     [exporter exportAsynchronouslyWithCompletionHandler:^{
-        
-        switch ([exporter status])
-        {
+        switch ([exporter status]) {
             case AVAssetExportSessionStatusFailed:
-                reject(@"event_failure", @"merge video error",  nil);
+                reject(@"event_failure", @"merge video error", nil);
                 break;
-                
             case AVAssetExportSessionStatusCancelled:
                 break;
-                
             case AVAssetExportSessionStatusCompleted:
                 resolve([@"file://" stringByAppendingString:myDocumentPath]);
                 break;
@@ -143,4 +152,3 @@ RCT_EXPORT_METHOD(merge:(NSArray *)fileNames
 }
 
 @end
-  
